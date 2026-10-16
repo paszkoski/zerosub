@@ -8,9 +8,11 @@ import {
   prepareCodexHome,
   prepareOpenCodeHome,
   readOpenCodeKey,
+  readPiAuthKey,
   removeHome,
   removeOpenCodeKey,
   writeOpenCodeKey,
+  writePiAuthKey,
 } from "./homes";
 
 let root: string;
@@ -211,6 +213,43 @@ describe("prepareOpenCodeHome", () => {
     await removeOpenCodeKey(home);
     await prepareOpenCodeHome(home, true);
     expect(await lstat(join(home, "pi", "auth.json")).catch(() => null)).toBeNull();
+  });
+});
+
+describe("pi auth files", () => {
+  it("reads the OpenCode Go key out of a pi agent directory", async () => {
+    const dir = join(root, "pi-agent");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "auth.json"), JSON.stringify({ anthropic: { type: "api_key", key: "sk-other" } }));
+    expect(await readPiAuthKey(dir)).toBeNull();
+    await writeFile(join(dir, "auth.json"), JSON.stringify({ "opencode-go": { type: "api_key", key: " oc_go " } }));
+    expect(await readPiAuthKey(dir)).toBe("oc_go");
+  });
+
+  it("merges the key into an existing auth file without disturbing other integrations", async () => {
+    const dir = join(root, "pi-agent");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "auth.json"), JSON.stringify({ anthropic: { type: "api_key", key: "sk-other" } }));
+
+    await writePiAuthKey(dir, "oc_new");
+
+    expect(JSON.parse(await readFile(join(dir, "auth.json"), "utf8"))).toEqual({
+      anthropic: { type: "api_key", key: "sk-other" },
+      "opencode-go": { type: "api_key", key: "oc_new" },
+    });
+    if (process.platform !== "win32") {
+      expect((await stat(join(dir, "auth.json"))).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it("refuses a file it can't parse rather than replacing the user's logins", async () => {
+    const dir = join(root, "pi-agent");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "auth.json"), "not json");
+
+    await expect(writePiAuthKey(dir, "oc_x")).rejects.toThrow(/auth file/);
+
+    expect(await readFile(join(dir, "auth.json"), "utf8")).toBe("not json");
   });
 });
 

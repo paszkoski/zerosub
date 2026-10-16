@@ -362,6 +362,9 @@ export async function codexSqliteHome(): Promise<string | null> {
  */
 const OPENCODE_KEY_FILE = "key";
 
+/** The provider id pi files OpenCode Go credentials under in its auth file. */
+export const PI_OPENCODE_PROVIDER = "opencode-go";
+
 /** The key as pasted at sign-in. The one credential both CLIs' overlays are fed from. */
 export async function readOpenCodeKey(home: string): Promise<string | null> {
   try {
@@ -401,7 +404,30 @@ async function writePiAuth(home: string): Promise<void> {
     await rm(path, { force: true });
     return;
   }
-  await writeJsonAtomically(path, { "opencode-go": { type: "api_key", key } });
+  await writeJsonAtomically(path, { [PI_OPENCODE_PROVIDER]: { type: "api_key", key } });
+}
+
+/** The OpenCode Go key pi has stored in an agent directory's auth file, if any. */
+export async function readPiAuthKey(dir: string): Promise<string | null> {
+  const parsed = await readJsonObject(join(dir, "auth.json"));
+  const entry = parsed?.[PI_OPENCODE_PROVIDER] as { key?: unknown } | undefined;
+  const key = typeof entry?.key === "string" ? entry.key.trim() : "";
+  return key || null;
+}
+
+/**
+ * Signs a pi agent directory in to OpenCode Go by merging the key into its auth file (mode 0600),
+ * so the other integrations in the file survive. Refuses a file that isn't JSON rather than
+ * replacing whatever the user has.
+ */
+export async function writePiAuthKey(dir: string, key: string): Promise<void> {
+  const path = join(dir, "auth.json");
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const existing = await readJsonObject(path);
+  if (existing === null && (await stat(path).catch(() => null))) {
+    throw new Error("pi's auth file isn't readable JSON; sort that out before signing in again.");
+  }
+  await writeJsonAtomically(path, { ...(existing ?? {}), [PI_OPENCODE_PROVIDER]: { type: "api_key", key: key.trim() } });
 }
 
 export async function prepareOpenCodeHome(home: string, force = false): Promise<void> {
