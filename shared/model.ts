@@ -1,16 +1,17 @@
 import { z } from "zod";
 
-/** The two subscription families this plugin manages. Custom provider profiles map onto one of them. */
-export const FamilySchema = z.enum(["claude", "codex"]);
+/** The subscription families this plugin manages. Custom provider profiles map onto one of them. */
+export const FamilySchema = z.enum(["claude", "codex", "opencode"]);
 export type Family = z.infer<typeof FamilySchema>;
 
 export const FAMILY_LABEL: Record<Family, string> = {
   claude: "Claude",
   codex: "ChatGPT",
+  opencode: "OpenCode Go",
 };
 
 export const UsageWindowSchema = z.object({
-  /** Stable key, e.g. `five_hour`, `seven_day`, `seven_day_opus`, `primary`, `secondary`. */
+  /** Stable key, e.g. `five_hour`, `seven_day`, `seven_day_opus`, `rolling`, `weekly`, `monthly`. */
   id: z.string(),
   label: z.string(),
   /** 0–100. */
@@ -49,7 +50,7 @@ export const UsageSchema = z.object({
 export type Usage = z.infer<typeof UsageSchema>;
 
 export const AccountKindSchema = z.enum([
-  /** The login the CLI uses on its own (`~/.claude`, `~/.codex`). */
+  /** The login the CLI uses on its own (`~/.claude`, `~/.codex`, `~/.pi`). */
   "main",
   /** Created by this plugin: an isolated credential home that shares everything else with main. */
   "managed",
@@ -87,9 +88,9 @@ export const AgentRouteSchema = z.object({
   /** The live session still runs on a different account and is waiting to be reopened. */
   pendingAccountId: z.string().nullable(),
   /**
-   * The conversation can move to another account in place. False for Codex agents that already
-   * have history: ChatGPT accounts can't read each other's encrypted reasoning, so switching
-   * continues the work in a new agent instead.
+   * The conversation can move to another account in place. False for Codex threads, whose ChatGPT
+   * accounts can't read each other's encrypted reasoning, and for OpenCode Go sessions, whose
+   * history lives in each account's own store: switching continues the work in a new agent instead.
    */
   movable: z.boolean(),
 });
@@ -111,6 +112,8 @@ export const LoginMethodSchema = z.enum([
   "browser",
   /** Works from any device: paste a code back (Claude) or type a code on the page (ChatGPT). */
   "code",
+  /** Paste the subscription's API key into the app (OpenCode Go). */
+  "key",
 ]);
 export type LoginMethod = z.infer<typeof LoginMethodSchema>;
 

@@ -19,6 +19,9 @@ const OWN_AUTH_KEYS: Record<Family, readonly string[]> = {
     "CLAUDE_CODE_USE_FOUNDRY",
   ],
   codex: ["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_HOME", "OPENAI_BASE_URL"],
+  // Both CLIs that speak to OpenCode Go take a key of their own: the opencode CLI from its
+  // environment or store, the pi provider from a custom agent directory.
+  opencode: ["OPENCODE_API_KEY", "PI_CODING_AGENT_DIR", "PI_API_KEY"],
 };
 
 export function bringsOwnAuth(family: Family, env: Record<string, unknown> | undefined): boolean {
@@ -30,24 +33,33 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
+/** The built-in Paseo providers, and the family each one runs on: `pi` and the opencode CLI both reach OpenCode Go. */
+const BUILT_IN: Readonly<Record<string, Family>> = {
+  claude: "claude",
+  codex: "codex",
+  opencode: "opencode",
+  pi: "opencode",
+};
+
 /**
- * Maps Paseo provider IDs to the subscription family they run on: the built-in `claude` and `codex`
- * providers, plus custom profiles that extend them without their own credentials.
+ * Maps Paseo provider IDs to the subscription family they run on: the built-in providers, plus
+ * custom profiles that extend one of them without their own credentials.
  */
 export function familiesFromConfig(providers: Record<string, unknown> | undefined): Record<string, Family> {
   const result: Record<string, Family> = {};
   const entries = providers ?? {};
-  for (const family of ["claude", "codex"] as const) {
-    const entry = asRecord(entries[family]);
-    if (!entry || !bringsOwnAuth(family, asRecord(entry.env))) result[family] = family;
+  for (const [id, family] of Object.entries(BUILT_IN)) {
+    const entry = asRecord(entries[id]);
+    if (!entry || !bringsOwnAuth(family, asRecord(entry.env))) result[id] = family;
   }
   for (const [id, value] of Object.entries(entries)) {
-    if (id === "claude" || id === "codex") continue;
+    if (id in BUILT_IN) continue;
     const entry = asRecord(value);
-    const base = entry?.extends;
-    if (base !== "claude" && base !== "codex") continue;
-    if (bringsOwnAuth(base, asRecord(entry?.env))) continue;
-    result[id] = base;
+    const base = entry && typeof entry.extends === "string" ? entry.extends : null;
+    const family = base ? (BUILT_IN as Record<string, Family>)[base] : undefined;
+    if (!family) continue;
+    if (bringsOwnAuth(family, asRecord(entry?.env))) continue;
+    result[id] = family;
   }
   return result;
 }
@@ -66,7 +78,7 @@ export class FamilyResolver {
       value = familiesFromConfig(asRecord(config.providers));
     } catch (error) {
       console.warn("[ZeroSub] could not read provider config; using built-in providers only", describe(error));
-      value = { claude: "claude", codex: "codex" };
+      value = { ...BUILT_IN };
     }
     this.cache = { at: Date.now(), value };
     return value;
