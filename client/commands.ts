@@ -1,5 +1,5 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
-import { FAMILY_LABEL, type AccountView, type StateView } from "../shared/model";
+import { FAMILY_LABEL, runsOnFamily, type AccountView, type StateView } from "../shared/model";
 import { setAgentAccount, setDefaultAccount } from "../shared/rpc";
 import type { ZeroSubStore } from "./store";
 
@@ -12,7 +12,7 @@ export function contributeCommands(client: PluginClientContext, store: ZeroSubSt
       id: "open-accounts",
       title: "Manage subscription accounts (ZeroSub)",
       icon: "Users",
-      keywords: ["zerosub", "claude", "chatgpt", "codex", "account", "subscription", "login", "switch"],
+      keywords: ["zerosub", "claude", "chatgpt", "codex", "opencode", "account", "subscription", "login", "switch"],
       context: "global",
       onSelect({ openSurface }) {
         openSurface("accounts");
@@ -29,7 +29,10 @@ export function contributeCommands(client: PluginClientContext, store: ZeroSubSt
       async onSubmit({ args, agent, openSurface }) {
         const state = await currentState(store);
         const family = state.providers[agent.provider];
-        if (!family) throw new Error(`${agent.provider} agents don't use Claude or ChatGPT subscription accounts.`);
+        if (!family) throw new Error(`${agent.provider} agents don't use Claude, ChatGPT or OpenCode Go subscription accounts.`);
+        if (!runsOnFamily(family, agent.model)) {
+          throw new Error(`This agent doesn't run on an ${FAMILY_LABEL[family]} model, so it has no account to switch.`);
+        }
         const query = args.trim();
         if (!query) {
           openSurface("accounts");

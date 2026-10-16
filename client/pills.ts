@@ -5,7 +5,7 @@ import type {
   PluginClientContext,
 } from "@getpaseo/plugin/client";
 import { formatPercent, peakUsage, shortLabel } from "../shared/format";
-import { FAMILY_LABEL, type AccountView, type Family, type StateView } from "../shared/model";
+import { FAMILY_LABEL, runsOnFamily, type AccountView, type Family, type StateView } from "../shared/model";
 import { setAgentAccount } from "../shared/rpc";
 import { forkPopover } from "./fork-confirm";
 import { resetPopover } from "./reset-confirm";
@@ -19,12 +19,14 @@ interface TrackedAgent {
   id: string;
   workspaceId: string;
   provider: string;
+  /** The model it runs: free and local OpenCode models never use one of the family's accounts. */
+  model: string | null;
 }
 
 /**
- * One composer pill per Claude/Codex agent showing the account it runs on. Tapping it opens a menu
- * of that provider's accounts. Pills only appear once a provider has more than one account, so a
- * single-account setup looks exactly like stock Paseo.
+ * One composer pill per routed agent (Claude, ChatGPT, OpenCode Go) showing the account it runs on.
+ * Tapping it opens a menu of that provider's accounts. Pills only appear once a provider has more
+ * than one account, so a single-account setup looks exactly like stock Paseo.
  */
 export function contributePills(client: PluginClientContext, store: ZeroSubStore): () => void {
   const agents = new Map<string, TrackedAgent>();
@@ -73,9 +75,9 @@ export function contributePills(client: PluginClientContext, store: ZeroSubStore
 
   const unsubscribeStore = store.subscribe(sync);
 
-  const track = (agent: { id: string; workspaceId?: string | null; provider: string }) => {
+  const track = (agent: { id: string; workspaceId?: string | null; provider: string; model?: string | null }) => {
     if (!agent.workspaceId) return;
-    agents.set(agent.id, { id: agent.id, workspaceId: agent.workspaceId, provider: agent.provider });
+    agents.set(agent.id, { id: agent.id, workspaceId: agent.workspaceId, provider: agent.provider, model: agent.model ?? null });
   };
 
   // The subscription covers the newest page and every later change. Older agents come from the
@@ -147,6 +149,8 @@ function buttonFor(
   if (!state.showComposerPill) return null;
   const family = state.providers[agent.provider];
   if (!family) return null;
+  // Free and local OpenCode models keep their own setup, so they have no account to show.
+  if (!runsOnFamily(family, agent.model)) return null;
   const accounts = state.accounts.filter((account) => account.family === family);
   const route = state.agents.find((entry) => entry.agentId === agent.id);
   const current =
@@ -157,9 +161,11 @@ function buttonFor(
   // A banked reset is worth offering right where the agent stopped, even with a single account.
   const resets = current.usage?.resets ?? null;
   const offerReset = resets !== null && (current.status === "limited" || resets.usableNow);
-  // With every account of this provider out, the work can carry on with the other provider.
-  const other: Family = family === "claude" ? "codex" : "claude";
+  // With every account of this provider out, the work can carry on with the other provider; only
+  // Claude and ChatGPT have each other to run to.
+  const other: Family | null = family === "claude" ? "codex" : family === "codex" ? "claude" : null;
   const offerFork =
+    other !== null &&
     current.status === "limited" &&
     accounts.every((account) => account.status === "limited" || account.status === "signed_out" || account.status === "disabled") &&
     state.accounts.some((account) => account.family === other && account.status === "ready");
@@ -169,7 +175,8 @@ function buttonFor(
     await store.rpc(setAgentAccount, { agentId: agent.id, accountId });
   };
 
-  // Codex threads can't change ChatGPT accounts in place; picking one continues in a new agent.
+  // Codex threads and OpenCode Go sessions can't change accounts in place; picking one continues
+  // in a new agent.
   const movable = route?.movable ?? true;
   const items: PluginButtonMenuEntry[] = accounts.map((account, index) => ({
     kind: "item",
@@ -192,7 +199,7 @@ function buttonFor(
     if (current.status === "limited") wayOut.push(entry);
     else items.push(entry);
   }
-  if (offerFork) {
+  if (offerFork && other) {
     wayOut.push({
       kind: "item",
       id: "fork-other",

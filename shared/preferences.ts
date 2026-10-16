@@ -24,7 +24,7 @@ export const preferences = defineSettings({
      * other provider (Claude ↔ ChatGPT), in a mode no more permissive than the original's.
      */
     forkOtherProvider: z.boolean().default(false),
-    /** Show the account pill in the composer of Claude and Codex agents. */
+    /** Show the account pill in the composer of subscription-backed agents (Claude, ChatGPT, OpenCode Go). */
     showComposerPill: z.boolean().default(true),
   }),
 });

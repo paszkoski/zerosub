@@ -108,7 +108,7 @@ export function PreferencesScreen({ theme, host, onOpenAccounts }: PluginSurface
           />
           <SettingsSwitch
             label="Show the account pill in the composer"
-            hint="Appears on Claude and Codex agents once a provider has two or more accounts."
+            hint="Appears on Claude, ChatGPT and OpenCode Go agents once a provider has two or more accounts."
             value={settings.values.showComposerPill}
             disabled={settings.saving}
             onValueChange={(showComposerPill) => save({ showComposerPill })}

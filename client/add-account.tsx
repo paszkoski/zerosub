@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { ActivityIndicator, Pressable, Text, View } from "react-native";
 import { formatPlan } from "../shared/format";
 import { FAMILY_LABEL, type Family, type LoginMethod, type LoginView } from "../shared/model";
-import { cancelLogin, startLogin, submitLoginCode } from "../shared/rpc";
+import { cancelLogin, renameAccount, startLogin, submitLoginCode } from "../shared/rpc";
 import { describe, useStore, type ZeroSubStore } from "./store";
 import { Button, useText } from "./ui";
 
@@ -37,12 +37,15 @@ export function AddAccountModal({
   // Phones start with a code; the browser stays on offer for someone at the host's computer.
   const mobile = layout.platform === "ios" || layout.platform === "android";
   const hostBrowser = state?.browserSignIn !== false;
-  const [method, setMethod] = useState<LoginMethod>(hostBrowser && !mobile ? "browser" : "code");
+  const [method, setMethod] = useState<LoginMethod>(family === "opencode" ? "key" : hostBrowser && !mobile ? "browser" : "code");
   const [loginId, setLoginId] = useState<string | null>(null);
   const [startError, setStartError] = useState<string | null>(null);
   // Each start gets a number; only the newest one's answer counts.
   const attempt = useRef(0);
   const closed = useRef(false);
+  // An OpenCode Go account is labelled with this name, once the daemon has created it.
+  const [keyName, setKeyName] = useState("");
+  const renamed = useRef(false);
 
   const begin = useCallback(
     async (next: LoginMethod) => {
@@ -73,6 +76,13 @@ export function AddAccountModal({
   const login = state?.logins.find((entry) => entry.id === loginId) ?? null;
   const account = login?.accountId ? state?.accounts.find((entry) => entry.id === login.accountId) : undefined;
   const finished = login ? login.step === "done" || login.step === "failed" || login.step === "canceled" : false;
+
+  const wantedName = keyName.trim();
+  useEffect(() => {
+    if (family !== "opencode" || renamed.current || !wantedName || !login?.accountId || login.step !== "done") return;
+    renamed.current = true;
+    void store.rpc(renameAccount, { accountId: login.accountId, label: wantedName }).catch(() => undefined);
+  }, [family, wantedName, login, store]);
 
   const close = useCallback(() => {
     closed.current = true;
@@ -121,6 +131,8 @@ export function AddAccountModal({
         method={method}
         browserUsable={hostBrowser}
         onSwitch={switchMethod}
+        name={keyName}
+        onName={setKeyName}
       />
     );
   } else if (login.step === "verifying") {
@@ -185,6 +197,8 @@ function SignInSteps({
   method,
   browserUsable,
   onSwitch,
+  name,
+  onName,
 }: {
   theme: Theme;
   store: ZeroSubStore;
@@ -194,6 +208,9 @@ function SignInSteps({
   /** A browser on the host's computer can finish the sign-in, so offer that route too. */
   browserUsable: boolean;
   onSwitch(method: LoginMethod): void;
+  /** Optional name for a new OpenCode Go account. */
+  name: string;
+  onName(value: string): void;
 }) {
   const text = useText(theme);
   const toast = useToast();
@@ -246,6 +263,71 @@ function SignInSteps({
     }),
     [theme],
   );
+
+  // OpenCode Go has no sign-in page: the key itself is the sign-in, checked against the usage
+  // endpoint. It has nowhere else to go, so the family never uses the steps below.
+  if (family === "opencode") {
+    return (
+      <View style={{ gap: 16 }}>
+        <Step theme={theme} number={1} title="Get an API key from OpenCode">
+          <Text style={text.muted}>
+            Create an API key on the OpenCode console for the account you want to add. The key stays on this machine
+            and signs in this account only.
+          </Text>
+          <Row start>
+            <Button
+              theme={theme}
+              icon="ExternalLink"
+              label="Open the OpenCode console"
+              tooltip="Open opencode.ai/console in your browser"
+              tooltipAlign="start"
+              onPress={() =>
+                void openExternalUrl("https://opencode.ai/console").catch((error: unknown) => toast.error(describe(error)))
+              }
+            />
+          </Row>
+        </Step>
+
+        <Step theme={theme} number={2} title="Paste the key to add the account">
+          <TextInput
+            value={name}
+            onChangeText={onName}
+            placeholder="Name (optional)"
+            placeholderTextColor={theme.colors.foregroundMuted}
+            maxLength={40}
+            style={inputStyle}
+            accessibilityLabel="Account name"
+          />
+          <TextInput
+            value={code}
+            onChangeText={setCode}
+            placeholder="Paste API key"
+            placeholderTextColor={theme.colors.foregroundMuted}
+            autoCapitalize="none"
+            autoCorrect={false}
+            secureTextEntry
+            onSubmitEditing={() => void submit()}
+            style={inputStyle}
+            accessibilityLabel="API key"
+          />
+          {codeError ? <Text style={text.danger}>{codeError}</Text> : null}
+          {login.message ? <Text style={text.small}>{login.message}</Text> : null}
+          <Row start>
+            <Button
+              theme={theme}
+              tone="primary"
+              label="Continue"
+              tooltip="Check the key with OpenCode and add the account"
+              tooltipAlign="start"
+              busy={submitting}
+              disabled={!code.trim()}
+              onPress={() => void submit()}
+            />
+          </Row>
+        </Step>
+      </View>
+    );
+  }
 
   const service = family === "claude" ? "Claude" : "ChatGPT";
   const canSwitch = browserUsable && (family === "codex" || (Boolean(login.url) && Boolean(login.codeUrl)));

@@ -43,7 +43,7 @@ export function AccountsSurface(props: PluginSurfaceProps & { store: ZeroSubStor
   // Keep usage moving while the screen is open.
   useEffect(() => store.watch(VISIBLE_POLL_MS), [store]);
 
-  const families: Family[] = ["claude", "codex"];
+  const families: Family[] = ["claude", "codex", "opencode"];
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.surface0 }}>
       <ScrollView
@@ -74,8 +74,8 @@ export function AccountsSurface(props: PluginSurfaceProps & { store: ZeroSubStor
             ) : null}
           </View>
           <Text style={text.muted}>
-            Keep several Claude and ChatGPT accounts signed in. Each agent uses one; when an account
-            hits its limit, agents move to another and keep going.
+            Keep several Claude, ChatGPT and OpenCode Go accounts signed in. Each agent uses one; when an account
+            hits its limit, work moves to another account and keeps going.
           </Text>
         </View>
 
@@ -194,7 +194,7 @@ function FamilySection({
     <View style={{ gap: 10 }}>
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
         <Text style={text.heading} accessibilityRole="header">
-          {family === "claude" ? "Claude" : "ChatGPT (Codex)"}
+          {family === "claude" ? "Claude" : family === "codex" ? "ChatGPT (Codex)" : "OpenCode Go"}
         </Text>
         <Button
           theme={theme}
@@ -264,7 +264,7 @@ function AccountCard({
       const message = describeReopen(`${account.label} is ${enabling ? "enabled" : "disabled"}`, result);
       const stayed =
         result.stayed > 0
-          ? ` · ${result.stayed} ChatGPT conversation${result.stayed === 1 ? " stays" : "s stay"} on it (they can't change accounts)`
+          ? ` · ${result.stayed} ${FAMILY_LABEL[account.family]} conversation${result.stayed === 1 ? " stays" : "s stay"} on it (they can't change accounts)`
           : "";
       toast.show(`${message}${stayed}`, { variant: "success", durationMs: 5_000 });
     } catch (error) {
@@ -487,7 +487,7 @@ function AccountCard({
           <Text style={text.body}>
             {account.family === "claude"
               ? "This signs the account out on this machine and deletes its saved login. Agents using it move to the default account; their conversations are kept."
-              : "This signs the account out on this machine and deletes its saved login. New agents use the default account. Existing ChatGPT conversations on it can't move, so start new agents for them."}
+              : `This signs the account out on this machine and deletes its saved login. New agents use the default account. Existing ${FAMILY_LABEL[account.family]} conversations on it can't move, so start new agents for them.`}
           </Text>
           <View style={{ flexDirection: "row", gap: 8, justifyContent: "flex-end" }}>
             <Button theme={theme} label="Cancel" tooltip="Keep this account" tooltipAlign="end" onPress={() => setConfirmRemove(false)} />
