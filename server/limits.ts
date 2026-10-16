@@ -42,6 +42,25 @@ const CLAUDE_SIGNED_OUT =
 const CODEX_SIGNED_OUT =
   /refresh token was already used|please log out and sign in again|access token could not be refreshed|refresh_token_reused|refresh_token_expired/i;
 
+/**
+ * OpenCode Go's wording when an account is out. The pi CLI passes the API's error types and
+ * messages through (`GoUsageLimitError`, `FreeUsageLimitError`, `Monthly usage limit reached`,
+ * `available balance`); the opencode CLI adds its subscription-sharing guard. Free models run on
+ * the same account and exhaust themselves the same way, so they count too.
+ */
+const OPENCODE_LIMITS: readonly RegExp[] = [
+  /GoUsageLimitError|FreeUsageLimitError/i,
+  /Monthly usage limit reached/i,
+  /available balance/i,
+  /out of budget/i,
+  /subscription_sharing_usage_limit_exceeded/i,
+  /insufficient_quota/i,
+  /quota exceeded/i,
+];
+
+/** An account the provider no longer accepts: a rejected key (pi and opencode word it differently). */
+const OPENCODE_SIGNED_OUT = /Invalid credential|No API key for provider:\s*opencode-go/i;
+
 const SYSTEM_ERROR = /^\[System Error\]\s*/;
 const MAX_NOTICE = 400;
 
@@ -105,6 +124,22 @@ export function detectClaudeSignOut(event: TurnEvent): string | null {
 
 export function detectCodexSignOut(event: TurnEvent): string | null {
   for (const text of notices(event, false)) if (CODEX_SIGNED_OUT.test(text)) return firstLine(text);
+  return null;
+}
+
+/**
+ * OpenCode limits don't carry a reset time in their wording; the usage endpoint is the authority
+ * on when the window turns over, and the failover refresh reads it there.
+ */
+export function detectOpenCodeLimit(event: TurnEvent): LimitHit | null {
+  for (const text of notices(event, false)) {
+    if (OPENCODE_LIMITS.some((pattern) => pattern.test(text))) return { message: firstLine(text), kind: "window", resetsAt: null };
+  }
+  return null;
+}
+
+export function detectOpenCodeSignOut(event: TurnEvent): string | null {
+  for (const text of notices(event, false)) if (OPENCODE_SIGNED_OUT.test(text)) return firstLine(text);
   return null;
 }
 

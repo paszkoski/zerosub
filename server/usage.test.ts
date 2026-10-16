@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Usage } from "../shared/model";
 import { SwitchGuard } from "./switch-guard";
-import { mergeUsage, retryDelayMs, showLimit } from "./usage";
+import { mergeUsage, parseGoUsage, retryDelayMs, showLimit } from "./usage";
 
 const reading = (patch: Partial<Usage> = {}): Usage => ({
   fetchedAt: "2026-09-23T08:00:00.000Z",
@@ -73,5 +73,45 @@ describe("SwitchGuard", () => {
     expect(guard.allows("a", 10_500)).toBe(true);
     guard.forget("a");
     expect(guard.allows("a", 2_000)).toBe(true);
+  });
+});
+
+describe("parseGoUsage", () => {
+  it("reads the rolling, weekly and monthly windows the endpoint reports", () => {
+    const windows = parseGoUsage({
+      usage: {
+        rolling: { status: "ok", percent: 0, resetsAt: "2026-10-16T20:07:15.000Z" },
+        weekly: { status: "ok", percent: 65, resetsAt: "2026-10-19T00:00:00.000Z" },
+        monthly: { status: "ok", percent: 66, resetsAt: "2026-11-01T11:28:42.000Z" },
+      },
+    });
+    expect(windows).toEqual([
+      { id: "rolling", label: "5-hour", usedPercent: 0, resetsAt: "2026-10-16T20:07:15.000Z" },
+      { id: "weekly", label: "Weekly", usedPercent: 65, resetsAt: "2026-10-19T00:00:00.000Z" },
+      { id: "monthly", label: "Monthly", usedPercent: 66, resetsAt: "2026-11-01T11:28:42.000Z" },
+    ]);
+  });
+
+  it("shows a rate-limited window as full, so routing treats the account as out until it resets", () => {
+    const windows = parseGoUsage({
+      usage: { rolling: { status: "rate-limited", percent: 78, resetsAt: "2026-10-16T20:00:00.000Z" } },
+    });
+    expect(windows).toEqual([{ id: "rolling", label: "5-hour", usedPercent: 100, resetsAt: "2026-10-16T20:00:00.000Z" }]);
+  });
+
+  it("skips windows that carry no number, and shapes it doesn't know", () => {
+    expect(parseGoUsage(null)).toEqual([]);
+    expect(parseGoUsage({})).toEqual([]);
+    expect(parseGoUsage({ usage: {} })).toEqual([]);
+    expect(parseGoUsage({ usage: { weekly: { percent: "65" }, rolling: { status: "ok" } } })).toEqual([]);
+  });
+
+  it("clamps odd values and tolerates missing or unparseable reset times", () => {
+    expect(parseGoUsage({ usage: { monthly: { percent: 150, resetsAt: "not a date" } } })).toEqual([
+      { id: "monthly", label: "Monthly", usedPercent: 100, resetsAt: null },
+    ]);
+    expect(parseGoUsage({ usage: { weekly: { percent: -3 } } })).toEqual([
+      { id: "weekly", label: "Weekly", usedPercent: 0, resetsAt: null },
+    ]);
   });
 });

@@ -5,6 +5,8 @@ import {
   detectClaudeSignOut,
   detectCodexLimit,
   detectCodexSignOut,
+  detectOpenCodeLimit,
+  detectOpenCodeSignOut,
   parseClaudeReset,
   parseCodexReset,
 } from "./limits";
@@ -215,5 +217,42 @@ describe("sign-in failures", () => {
       "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.";
     expect(detectCodexSignOut({ outcome: failed(message), timeline: [] })).not.toBeNull();
     expect(detectCodexSignOut({ outcome: failed("stream disconnected"), timeline: [] })).toBeNull();
+  });
+});
+
+describe("detectOpenCodeLimit", () => {
+  it("recognises the API's limit errors wherever they surface", () => {
+    for (const message of [
+      "GoUsageLimitError: Monthly usage limit reached. Resets Nov 1.",
+      "FreeUsageLimitError",
+      "Your available balance is 0",
+      "upstream error: subscription_sharing_usage_limit_exceeded",
+    ]) {
+      const hit = detectOpenCodeLimit({ outcome: failed(message), timeline: [] });
+      expect(hit?.kind).toBe("window");
+      // The usage endpoint carries the exact reset time; failover refreshes it there.
+      expect(hit?.resetsAt).toBeNull();
+    }
+    const timeline = turn("[System Error] GoUsageLimitError: quota exceeded");
+    expect(detectOpenCodeLimit({ outcome: completed, timeline })).not.toBeNull();
+  });
+
+  it("ignores unrelated failures and the model's own words", () => {
+    expect(detectOpenCodeLimit({ outcome: failed("stream disconnected"), timeline: [] })).toBeNull();
+    for (const reply of ["I'll catch GoUsageLimitError and back off.", "The quota exceeded branch now has a test."]) {
+      expect(detectOpenCodeLimit({ outcome: completed, timeline: turn(reply) })).toBeNull();
+    }
+  });
+});
+
+describe("detectOpenCodeSignOut", () => {
+  it("recognises a key the provider no longer accepts, from either CLI", () => {
+    expect(detectOpenCodeSignOut({ outcome: failed("Upstream request failed: Invalid credential"), timeline: [] })).not.toBeNull();
+    expect(detectOpenCodeSignOut({ outcome: failed("No API key for provider: opencode-go"), timeline: [] })).not.toBeNull();
+  });
+
+  it("ignores other failures", () => {
+    expect(detectOpenCodeSignOut({ outcome: failed("stream disconnected"), timeline: [] })).toBeNull();
+    expect(detectOpenCodeSignOut({ outcome: failed("No API key for provider: anthropic"), timeline: [] })).toBeNull();
   });
 });

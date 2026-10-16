@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { UsageSchema, type Usage } from "../shared/model";
+import { UsageSchema, type Usage, type UsageWindow } from "../shared/model";
 import { readJson, writeJsonAtomic } from "./json-file";
 import { dataDir } from "./paths";
 
@@ -45,6 +45,45 @@ export function mergeUsage(previous: Usage | undefined, next: Usage): Usage {
   if (next.windows.length === 0) return { ...previous, error: next.error };
   if (next.cached && Date.parse(next.fetchedAt) <= Date.parse(previous.fetchedAt)) return previous;
   return next;
+}
+
+/** OpenCode Go's windows, in the order to show them. */
+const GO_WINDOWS: ReadonlyArray<readonly [key: string, label: string]> = [
+  ["rolling", "5-hour"],
+  ["weekly", "Weekly"],
+  ["monthly", "Monthly"],
+];
+
+/**
+ * The windows from OpenCode Go's usage endpoint, whose `percent` is already 0–100 per rolling,
+ * weekly and monthly allowance. A window the provider has marked `rate-limited` is shown as full,
+ * so routing treats the account as out until it resets.
+ */
+export function parseGoUsage(body: unknown): UsageWindow[] {
+  const usage = (body as { usage?: unknown } | null | undefined)?.usage;
+  if (!usage || typeof usage !== "object") return [];
+  const windows: UsageWindow[] = [];
+  for (const [key, label] of GO_WINDOWS) {
+    const entry = (usage as Record<string, unknown>)[key];
+    if (!entry || typeof entry !== "object") continue;
+    const { percent, resetsAt, status } = entry as { percent?: unknown; resetsAt?: unknown; status?: unknown };
+    if (typeof percent !== "number" || !Number.isFinite(percent)) continue;
+    const used = Math.min(100, Math.max(0, percent));
+    windows.push({
+      id: key,
+      label,
+      usedPercent: status === "rate-limited" ? Math.max(100, used) : used,
+      resetsAt: isoDate(resetsAt),
+    });
+  }
+  return windows;
+}
+
+/** An ISO timestamp, whatever shape the provider sent, or null. */
+function isoDate(value: unknown): string | null {
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? new Date(at).toISOString() : null;
 }
 
 function usagePath(): string {
