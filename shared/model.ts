@@ -10,6 +10,17 @@ export const FAMILY_LABEL: Record<Family, string> = {
   opencode: "OpenCode Go",
 };
 
+/** Model prefix that marks an agent on the opencode/pi providers as running on an OpenCode Go plan. */
+export const GO_MODEL_PREFIX = "opencode-go/";
+
+/**
+ * Whether an agent's model is served by one of the family's subscription accounts. The opencode
+ * and pi providers also serve free and local models, which keep their own setup and aren't ours.
+ */
+export function runsOnFamily(family: Family, model: string | null | undefined): boolean {
+  return family !== "opencode" || Boolean(model && model.startsWith(GO_MODEL_PREFIX));
+}
+
 export const UsageWindowSchema = z.object({
   /** Stable key, e.g. `five_hour`, `seven_day`, `seven_day_opus`, `rolling`, `weekly`, `monthly`. */
   id: z.string(),

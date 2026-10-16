@@ -109,7 +109,7 @@ async function setUp(state: Partial<StoredState>, hit: () => LimitHit, options: 
   const families = { resolve: async () => ({ claude: "claude" as const }) };
   const claude = { ...claudeAdapter(hit), ...(options.detectLimit ? { detectLimit: options.detectLimit } : {}) };
   const service = new Service(
-    { claude, codex: claudeAdapter(hit) },
+    { claude, codex: claudeAdapter(hit), opencode: claudeAdapter(hit) },
     store,
     families as unknown as FamilyResolver,
     reopener as unknown as Reopener,
@@ -131,7 +131,7 @@ describe("failover", () => {
     const { store, reopened, sent, notes, limitTurn } = await setUp(
       {
         accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: MAIN, codex: null },
+        defaults: { claude: MAIN, codex: null, opencode: null },
         bindings: { [AGENT]: { accountId: HELLO, source: "user", at: new Date().toISOString() } },
         sessions: {},
       },
@@ -152,7 +152,7 @@ describe("failover", () => {
     const { store, reopened, notes, limitTurn } = await setUp(
       {
         accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: MAIN, codex: null },
+        defaults: { claude: MAIN, codex: null, opencode: null },
         sessions: {},
       },
       () => ({ kind: "window", resetsAt, message: "You've hit your session limit" }),
@@ -169,7 +169,7 @@ describe("failover", () => {
     const { reopened, notes, limitTurn } = await setUp(
       {
         accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: MAIN, codex: null },
+        defaults: { claude: MAIN, codex: null, opencode: null },
         sessions: {},
       },
       () => ({ kind: "window", resetsAt: inPast(), message: "You've hit your session limit" }),
@@ -187,7 +187,7 @@ describe("failover", () => {
     const { service, store, reopened, notes, paseo } = await setUp(
       {
         accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: MAIN, codex: null },
+        defaults: { claude: MAIN, codex: null, opencode: null },
         sessions: {},
       },
       () => {
@@ -224,7 +224,7 @@ describe("failover", () => {
     const { store, reopened, notes, limitTurn } = await setUp(
       {
         accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: MAIN, codex: null },
+        defaults: { claude: MAIN, codex: null, opencode: null },
         sessions: { [AGENT]: { accountId: MAIN, family: "claude", openedAt } },
       },
       () => ({ kind: "window", resetsAt: inFuture(), message: "You've hit your weekly limit" }),
@@ -243,7 +243,7 @@ describe("failover", () => {
     const { store, limitTurn } = await setUp(
       {
         accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: MAIN, codex: null },
+        defaults: { claude: MAIN, codex: null, opencode: null },
         sessions: { [AGENT]: { accountId: MAIN, family: "claude", openedAt: "2026-09-23T07:00:00.000Z" } },
       },
       () => ({ kind: "window", resetsAt: inFuture(), message: "You've hit your weekly limit" }),
@@ -274,7 +274,7 @@ describe("forking to the other provider", () => {
     await store.update((draft) =>
       Object.assign(draft, {
         accounts: [account(MAIN, "marketing", "main"), { ...account(CODEX_MAIN, "hello", "main"), family: "codex" }],
-        defaults: { claude: MAIN, codex: CODEX_MAIN },
+        defaults: { claude: MAIN, codex: CODEX_MAIN, opencode: null },
       }),
     );
     const source = {
@@ -322,6 +322,7 @@ describe("forking to the other provider", () => {
       {
         claude: claudeAdapter(() => ({ kind: "window", resetsAt: inFuture(), message: "You've hit your session limit" })),
         codex: { ...claudeAdapter(() => ({ kind: "window", resetsAt: null, message: "" })), family: "codex", portable: false } as FamilyAdapter,
+        opencode: { ...claudeAdapter(() => ({ kind: "window", resetsAt: null, message: "" })), family: "opencode", portable: false } as FamilyAdapter,
       },
       store,
       { resolve: async () => ({ claude: "claude" as const, codex: "codex" as const }) } as unknown as FamilyResolver,
@@ -372,7 +373,7 @@ describe("disabling an account", () => {
     const { service, store, reopened } = await setUp(
       {
         accounts: [account(MAIN, "marketing", "main"), account(HELLO, "hello", "managed")] as never,
-        defaults: { claude: MAIN, codex: null },
+        defaults: { claude: MAIN, codex: null, opencode: null },
         bindings: { [AGENT]: { accountId: HELLO, source: "user", at: new Date().toISOString() } },
         sessions: { [AGENT]: { accountId: HELLO, family: "claude", openedAt: new Date().toISOString() } },
       },
@@ -393,5 +394,231 @@ describe("disabling an account", () => {
     state = await store.read();
     expect(state.sessions[AGENT]?.accountId).toBe(HELLO);
     expect(reopened).toHaveLength(2);
+  });
+});
+
+describe("OpenCode Go sessions", () => {
+  const GO_MAIN = MAIN_ACCOUNT_ID.opencode;
+  const GO_HELLO = "opencode-hello";
+
+  function goAccount(id: string, label: string, kind: "main" | "managed") {
+    return { id, family: "opencode" as const, label, kind, home: kind === "main" ? null : join(tmpdir(), id), createdAt: "2026-10-01T00:00:00.000Z" };
+  }
+
+  /** An OpenCode Go adapter whose failed turns are a window limit resetting at `resetsAt`. */
+  function goAdapter(hit: () => LimitHit): FamilyAdapter {
+    const reading = (): UsageRead => ({ fetchedAt: new Date().toISOString(), windows: [], error: null, cached: false, resets: null });
+    return {
+      family: "opencode",
+      portable: false,
+      usageSpacingMs: 0,
+      available: async () => ({ ok: true, detail: null }),
+      prepareHome: async () => undefined,
+      env: async (home: string | null) =>
+        home
+          ? { OPENCODE_API_KEY: "test-key", PI_CODING_AGENT_DIR: join(home, "pi"), XDG_DATA_HOME: join(home, "oc-data") }
+          : { OPENCODE_API_KEY: null, PI_CODING_AGENT_DIR: null, XDG_DATA_HOME: null },
+      identity: async () => null,
+      usage: async () => reading(),
+      redeemReset: async () => ({ outcome: "none", message: "none", left: null }),
+      login: async () => {
+        throw new Error("not in tests");
+      },
+      logout: async () => undefined,
+      detectLimit: (event: { outcome: { kind: string } }) => (event.outcome.kind === "failed" ? hit() : null),
+      detectSignOut: () => null,
+    } as unknown as FamilyAdapter;
+  }
+
+  function fakeGoPaseo(model: string | null, extras: Array<{ id: string; model: string | null }> = []) {
+    const sent: string[] = [];
+    const notes: Array<{ from: string | null; to: string; outcome: string; detail: string | null }> = [];
+    const created: Array<{ agentId: string; config: { provider: string; modeId?: string }; title: string; prompt: string }> = [];
+    const agent = {
+      id: AGENT,
+      provider: "opencode",
+      status: "idle",
+      title: "Fix the fabric",
+      model,
+      currentModeId: "build",
+      workspaceId: "ws-1",
+      archivedAt: null,
+      lastUserMessageAt: "2026-10-01T07:00:00.000Z",
+      labels: {},
+    };
+    const entries = [agent, ...extras.map((extra) => ({ ...agent, ...extra }))];
+    const paseo = {
+      config: { get: async () => ({ config: { providers: {} } }) },
+      providers: { listModels: async () => ({ models: [{ id: "opencode-go/deepseek-v4.1-flash", isDefault: true }] }) },
+      workspaces: {
+        ref: () => ({
+          agents: {
+            create: async (request: (typeof created)[number]) => void created.push(request),
+          },
+        }),
+      },
+      agents: {
+        list: async () => ({ entries: entries.map((entry) => ({ agent: entry })), pageInfo: { hasMore: false, nextCursor: null } }),
+        ref: () => ({
+          refresh: async () => ({ agent }),
+          send: async (text: string) => void sent.push(text),
+          timeline: {
+            append: async (item: { data: (typeof notes)[number] }) => void notes.push(item.data),
+            refetch: async () => ({ entries: [] }),
+          },
+        }),
+      },
+    };
+    return { paseo, sent, notes, created };
+  }
+
+  async function setUpGo(
+    state: Partial<StoredState>,
+    model: string | null,
+    hit: () => LimitHit,
+    extras: Array<{ id: string; model: string | null }> = [],
+  ) {
+    const store = new StateStore(join(root, "state.json"));
+    await store.update((draft) => Object.assign(draft, state));
+    const fake = fakeGoPaseo(model, extras);
+    const context = { paseo: fake.paseo } as never;
+    const service = new Service(
+      { claude: claudeAdapter(hit), codex: claudeAdapter(hit), opencode: goAdapter(hit) },
+      store,
+      {
+        resolve: async () => ({ opencode: "opencode" as const, pi: "opencode" as const, claude: "claude" as const, codex: "codex" as const }),
+      } as unknown as FamilyResolver,
+      { locate: async () => null, reopen: async () => ({ ok: true as const }) } as unknown as Reopener,
+    );
+    return { service, store, context, ...fake };
+  }
+
+  const openSession = (service: Service, context: never, env: Record<string, string> = {}, reason = "create") =>
+    service.onSessionOpen({ agentId: AGENT, provider: "opencode", reason, purpose: "interactive", env } as never, context);
+
+  const goDefaults = (account: string) => ({ claude: null, codex: null, opencode: account });
+
+  it("routes a Go model session to its account and hands it the account's homes", async () => {
+    const { service, store, context } = await setUpGo(
+      {
+        accounts: [goAccount(GO_MAIN, "go main", "main"), goAccount(GO_HELLO, "hello", "managed")] as never,
+        defaults: goDefaults(GO_HELLO),
+      },
+      "opencode-go/deepseek-v4.1-flash",
+      () => ({ kind: "window", resetsAt: inFuture(), message: "unused" }),
+    );
+    const result = await openSession(service, context);
+    expect(result?.env).toEqual({
+      OPENCODE_API_KEY: "test-key",
+      PI_CODING_AGENT_DIR: join(tmpdir(), GO_HELLO, "pi"),
+      XDG_DATA_HOME: join(tmpdir(), GO_HELLO, "oc-data"),
+    });
+    expect((await store.read()).sessions[AGENT]?.accountId).toBe(GO_HELLO);
+  });
+
+  it("leaves a free model, or one it can't read, on the daemon's own setup", async () => {
+    for (const model of ["opencode/deepseek-v4.1-flash-free", null]) {
+      const { service, store, context } = await setUpGo(
+        {
+          accounts: [goAccount(GO_HELLO, "hello", "managed")] as never,
+          defaults: goDefaults(GO_HELLO),
+          sessions: { [AGENT]: { accountId: GO_HELLO, family: "opencode", openedAt: "2026-10-01T06:00:00.000Z" } },
+        },
+        model,
+        () => ({ kind: "window", resetsAt: inFuture(), message: "unused" }),
+      );
+      const result = await openSession(
+        service,
+        context,
+        { PI_CODING_AGENT_DIR: join(tmpdir(), GO_HELLO, "pi"), OPENCODE_API_KEY: "stale", KEEP: "1" },
+        "refresh",
+      );
+      expect(result?.env).toEqual({ KEEP: "1" });
+      expect((await store.read()).sessions[AGENT]).toBeUndefined();
+    }
+  });
+
+  it("keeps free and unknown models out of the account view, so only Go sessions count", async () => {
+    const { service, context, paseo } = await setUpGo(
+      {
+        accounts: [goAccount(GO_MAIN, "go main", "main"), goAccount(GO_HELLO, "hello", "managed")] as never,
+        defaults: goDefaults(GO_MAIN),
+      },
+      "opencode-go/deepseek-v4.1-flash",
+      () => ({ kind: "window", resetsAt: inFuture(), message: "unused" }),
+      [
+        { id: "agent-free", model: "opencode/deepseek-v4.1-flash-free" },
+        { id: "agent-blank", model: null },
+      ],
+    );
+    const state = await service.view(paseo as never, false);
+    expect(state.agents.map((route) => route.agentId)).toEqual([AGENT]);
+    expect(state.accounts.find((account) => account.id === GO_MAIN)?.agentCount).toBe(1);
+  });
+
+  it("doesn't blame the CLI login when a turn it never routed reports a Go-style limit", async () => {
+    // Free-model turns can surface Go-style failures from the shared CLIs; without a recorded
+    // session they said nothing about any account.
+    const { service, store, context, notes } = await setUpGo(
+      {
+        accounts: [goAccount(GO_MAIN, "go main", "main")] as never,
+        defaults: goDefaults(GO_MAIN),
+      },
+      "opencode/deepseek-v4.1-flash-free",
+      () => ({ kind: "window", resetsAt: inFuture(), message: "insufficient_quota" }),
+    );
+    await service.onTurnEnded(
+      {
+        agent: { id: AGENT, provider: "opencode" },
+        turnId: "t",
+        outcome: { kind: "failed", error: { message: "insufficient_quota" } },
+        timeline: [],
+      } as never,
+      context,
+    );
+    expect((await store.read()).accounts.find((a) => a.id === GO_MAIN)?.limitedUntil).toBeNull();
+    expect(notes).toHaveLength(0);
+  });
+
+  it("continues a limited Go session in a new agent on the next account", async () => {
+    const { service, store, context, notes, created } = await setUpGo(
+      {
+        accounts: [goAccount(GO_MAIN, "go main", "main"), goAccount(GO_HELLO, "hello", "managed")] as never,
+        defaults: goDefaults(GO_MAIN),
+        sessions: { [AGENT]: { accountId: GO_MAIN, family: "opencode", openedAt: "2026-10-01T06:00:00.000Z" } },
+      },
+      "opencode-go/deepseek-v4.1-flash",
+      () => ({ kind: "window", resetsAt: inFuture(), message: "Monthly usage limit reached" }),
+    );
+    await service.onTurnEnded(
+      {
+        agent: { id: AGENT, provider: "opencode" },
+        turnId: "t",
+        outcome: { kind: "failed", error: { message: "Monthly usage limit reached" } },
+        timeline: [],
+      } as never,
+      context,
+    );
+    const state = await store.read();
+    expect(state.accounts.find((a) => a.id === GO_MAIN)?.limitedUntil).not.toBeNull();
+    expect(created).toHaveLength(1);
+    expect(created[0]?.title).toBe("Fix the fabric (continued)");
+    expect(created[0]?.config).toEqual({ provider: "opencode/opencode-go/deepseek-v4.1-flash", modeId: "build" });
+    expect(created[0]?.prompt).toMatch(/earlier OpenCode Go session/);
+    expect(created[0]?.prompt).toMatch(/its OpenCode Go account \(go main\) reached its usage limit/);
+    expect(state.bindings[created[0]?.agentId ?? ""]).toMatchObject({ accountId: GO_HELLO, source: "thread" });
+    expect(notes.at(-1)).toMatchObject({ outcome: "continued", to: "hello" });
+  });
+
+  it("won't offer to continue a Go agent on another provider", async () => {
+    const { service, paseo } = await setUpGo(
+      {
+        accounts: [goAccount(GO_MAIN, "go main", "main")] as never,
+        defaults: goDefaults(GO_MAIN),
+      },
+      "opencode-go/deepseek-v4.1-flash",
+      () => ({ kind: "window", resetsAt: inFuture(), message: "unused" }),
+    );
+    await expect(service.forkAgent(paseo as never, AGENT)).rejects.toThrow(/can't continue on another provider/);
   });
 });

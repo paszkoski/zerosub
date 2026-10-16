@@ -8,6 +8,7 @@ import type {
 } from "@getpaseo/plugin/server";
 import {
   FAMILY_LABEL,
+  runsOnFamily,
   type AccountView,
   type AgentRoute,
   type Family,
@@ -22,6 +23,7 @@ import { SWITCH_ROW_KIND, SWITCH_ROW_VERSION, type SwitchRow } from "../shared/t
 import {
   applyEnv,
   type AgentTimelineItem,
+  type EnvPatch,
   type FamilyAdapter,
   type Identity,
   type LimitHit,
@@ -55,9 +57,16 @@ import {
 type PaseoApi = PluginHookContext["paseo"];
 type TurnEnded = PluginLifecycleEvents["agent.turn_ended"];
 
-const FAMILIES: readonly Family[] = ["claude", "codex"];
-const PROVIDER_NAME: Record<Family, string> = { claude: "Claude Code", codex: "Codex" };
-const OTHER_FAMILY: Record<Family, Family> = { claude: "codex", codex: "claude" };
+const FAMILIES: readonly Family[] = ["claude", "codex", "opencode"];
+const PROVIDER_NAME: Record<Family, string> = { claude: "Claude Code", codex: "Codex", opencode: "The pi CLI" };
+// Only Claude and ChatGPT can carry an agent's work to each other; OpenCode Go has no counterpart.
+const FORK_PAIRS: Partial<Record<Family, Family>> = { claude: "codex", codex: "claude" };
+/** What conversations that can't change accounts are called in copy, provider by provider. */
+const THREAD_WORD: Partial<Record<Family, string>> = { codex: "ChatGPT", opencode: "OpenCode Go" };
+/** What a stopped conversation is called in a continuation prompt; Codex fits the prompt's own default. */
+const SESSION_NAME: Partial<Record<Family, string>> = { opencode: "OpenCode Go" };
+/** The environment a Go session must not inherit: another account's homes or a daemon-wide key. */
+const OPENCODE_ENV: EnvPatch = { PI_CODING_AGENT_DIR: null, XDG_DATA_HOME: null, OPENCODE_API_KEY: null };
 /** How often to read usage: accounts in use, the defaults, and the rest. Adapters space reads further. */
 const USAGE_BUSY_MS = 60_000;
 const USAGE_DEFAULT_MS = 5 * 60_000;
@@ -105,6 +114,8 @@ interface LoginSession {
 interface AgentInfo {
   id: string;
   provider: string;
+  /** The model the agent runs, e.g. `opencode-go/deepseek-v4.1-flash`; null when Paseo doesn't know it. */
+  model: string | null;
   status: string;
   archived: boolean;
   /** The conversation has started (so a Codex thread already holds account-bound reasoning). */
@@ -135,7 +146,7 @@ export class Service {
   private readonly identityCheckedAt = new Map<string, number>();
   private readonly availability = new Map<Family, { ok: boolean; detail: string | null; at: number }>();
   private readonly logins = new Map<string, LoginSession>();
-  private readonly loginLocks: Record<Family, Mutex> = { claude: new Mutex(), codex: new Mutex() };
+  private readonly loginLocks: Record<Family, Mutex> = { claude: new Mutex(), codex: new Mutex(), opencode: new Mutex() };
   /** Agents whose account changed mid-turn; reopened when the turn ends. */
   private readonly deferred = new Map<string, SwitchRow | null>();
   /** Agents in the middle of a failover, so nothing else moves them at the same time. */
@@ -295,7 +306,7 @@ export class Service {
       }
       for (const name of names) {
         const home = join(root, name);
-        const family: Family | null = name.startsWith("claude-") ? "claude" : name.startsWith("codex-") ? "codex" : null;
+        const family = FAMILIES.find((entry) => name.startsWith(`${entry}-`)) ?? null;
         if (!family || owned.has(home)) continue;
         // A managed account's ID is its home's folder name, so sessions still name it after removal.
         const users = Object.entries(state.sessions)
@@ -343,6 +354,16 @@ export class Service {
     this.attach(context.paseo);
     const family = (await this.families.resolve(context.paseo))[request.provider];
     if (!family) return undefined;
+    // OpenCode Go routing rides on the agent's model: the same CLIs serve free and local models
+    // that must keep the daemon's own setup (an OpenRouter credential, say). Those sessions are
+    // left alone; any Go session recorded earlier is forgotten so its usage isn't held against them.
+    if (family === "opencode") {
+      const model = (await agentInfo(context.paseo, request.agentId))?.model;
+      if (!runsOnFamily(family, model)) {
+        await this.forgetSession(request.agentId);
+        return { ...request, env: applyEnv(OPENCODE_ENV, request.env) };
+      }
+    }
     const adapter = this.adapters[family];
     const now = Date.now();
     const state = await this.store.read();
@@ -386,12 +407,20 @@ export class Service {
     return { ...request, env: applyEnv(await adapter.env(account.home), request.env) };
   }
 
+  /** Drops the session record of an agent whose model turned out not to run on a Go account. */
+  private async forgetSession(agentId: string): Promise<void> {
+    if (!(await this.store.read()).sessions[agentId]) return;
+    await this.store.update((draft) => {
+      delete draft.sessions[agentId];
+    });
+  }
+
   /** A turn uses the account from its first token, so a long one keeps its usage fresh too. */
   async onTurnStarted(agent: { id: string; provider: string }, context: PluginHookContext): Promise<void> {
     this.attach(context.paseo);
     const family = (await this.families.resolve(context.paseo))[agent.provider];
     if (!family) return;
-    const accountId = this.runningOn(await this.store.read(), agent.id, family);
+    const accountId = this.turnAccount(await this.store.read(), agent.id, family);
     if (accountId) this.activeAt.set(accountId, Date.now());
   }
 
@@ -401,9 +430,11 @@ export class Service {
     if (!family) return;
     const adapter = this.adapters[family];
     const agentId = event.agent.id;
-    const accountId = this.runningOn(await this.store.read(), agentId, family);
+    const accountId = this.turnAccount(await this.store.read(), agentId, family);
     if (accountId) this.activeAt.set(accountId, Date.now());
-    if (event.outcome.kind !== "canceled") {
+    // Nothing to blame without an account: an OpenCode Go turn ZeroSub never routed (a free
+    // model's) must not mark the Go login limited.
+    if (event.outcome.kind !== "canceled" && accountId) {
       const hit = adapter.detectLimit(event);
       if (hit) return this.handleUnavailable(context.paseo, agentId, family, event.timeline, { kind: "limit", hit });
       if (adapter.detectSignOut(event) && (await this.confirmSignedOut(agentId, family))) {
@@ -428,7 +459,7 @@ export class Service {
   /** Re-checks the account an agent was using; true when it really is signed out now. */
   private async confirmSignedOut(agentId: string, family: Family): Promise<boolean> {
     const state = await this.store.read();
-    const accountId = this.runningOn(state, agentId, family);
+    const accountId = this.turnAccount(state, agentId, family);
     if (!accountId) return false;
     await this.refreshIdentity(accountId);
     return findAccount(await this.store.read(), accountId)?.signedIn === false;
@@ -465,7 +496,7 @@ export class Service {
     let exhausted: string | null = null;
     try {
       const state = await this.store.read();
-      const account = findAccount(state, this.runningOn(state, agentId, family));
+      const account = findAccount(state, this.turnAccount(state, agentId, family));
       if (!account) return;
       exhausted = account.id;
       await this.lockFor(account.id).run(() => this.failover(paseo, agentId, family, account, timeline, problem));
@@ -595,10 +626,11 @@ export class Service {
       }
       if (reason !== "limit") return;
       let detail: string | null = null;
-      if (this.prefs.forkOtherProvider) {
+      const other = FORK_PAIRS[family];
+      if (other && this.prefs.forkOtherProvider) {
         // Opt-in: every account of this provider is out, so carry on with the other provider.
         const result = await this.forkToOtherProvider(paseo, agentId, family, timeline, "auto").catch((error: unknown) => ({
-          skipped: `Couldn't continue on ${FAMILY_LABEL[OTHER_FAMILY[family]]}: ${describe(error)}`,
+          skipped: `Couldn't continue on ${FAMILY_LABEL[other]}: ${describe(error)}`,
         }));
         if ("fork" in result) {
           this.switchGuard.note(agentId, now);
@@ -613,10 +645,10 @@ export class Service {
           });
           return;
         }
-        console.log(`[ZeroSub] not continuing ${agentId} on ${FAMILY_LABEL[OTHER_FAMILY[family]]}: ${result.skipped}`);
+        console.log(`[ZeroSub] not continuing ${agentId} on ${FAMILY_LABEL[other]}: ${result.skipped}`);
         detail = result.skipped;
-      } else if (mostAvailable(latest, OTHER_FAMILY[family], (id) => this.usage.get(id), now, new Set())) {
-        detail = `Or continue on ${FAMILY_LABEL[OTHER_FAMILY[family]]} in a new agent from the account button.`;
+      } else if (other && mostAvailable(latest, other, (id) => this.usage.get(id), now, new Set())) {
+        detail = `Or continue on ${FAMILY_LABEL[other]} in a new agent from the account button.`;
       }
       await this.appendRow(paseo, agentId, { ...base, to: account.label, reason: "exhausted", outcome: "stayed", detail });
       return;
@@ -643,21 +675,22 @@ export class Service {
       return;
     }
 
-    // A ChatGPT thread can't move to another account; carry the work on in a new agent there.
+    // A ChatGPT thread or OpenCode Go session can't move to another account; carry the work on in
+    // a new agent there.
     if (!this.prefs.autoContinue) {
       await this.appendRow(paseo, agentId, {
         ...base,
         to: next.label,
         reason,
         outcome: "stayed",
-        detail: `New ChatGPT agents will use ${next.label}.`,
+        detail: `New ${THREAD_WORD[family]} agents will use ${next.label}.`,
       });
       return;
     }
     const why =
       reason === "limit"
-        ? `its ChatGPT account (${account.label}) reached its usage limit`
-        : `its ChatGPT account (${account.label}) was signed out`;
+        ? `its ${THREAD_WORD[family]} account (${account.label}) reached its usage limit`
+        : `its ${THREAD_WORD[family]} account (${account.label}) was signed out`;
     try {
       const continuation = await this.continueElsewhere(paseo, agentId, next, why, timeline, "auto");
       this.switchGuard.note(agentId, now);
@@ -792,6 +825,16 @@ export class Service {
     return state.sessions[agentId]?.accountId ?? mainAccount(state, family)?.id;
   }
 
+  /**
+   * The account a turn runs on. Routing to OpenCode Go is gated on the agent's model and its
+   * sessions live only through ZeroSub, so a session it didn't record isn't on a Go account.
+   * Claude and Codex sessions can belong to the CLI's own login whether recorded or not.
+   */
+  private turnAccount(state: StoredState, agentId: string, family: Family): string | undefined {
+    if (family === "opencode") return state.sessions[agentId]?.accountId;
+    return this.runningOn(state, agentId, family);
+  }
+
   /** The reset time of the window that is full, from the freshest live usage reading. */
   private resetFromUsage(accountId: string): string | null {
     const usage = this.usage.get(accountId);
@@ -881,7 +924,8 @@ export class Service {
     timeline: readonly AgentTimelineItem[] | undefined,
     source: "auto" | "user",
   ): Promise<{ fork: Continuation; account: StoredAccount; family: Family } | { skipped: string }> {
-    const other = OTHER_FAMILY[family];
+    const other = FORK_PAIRS[family];
+    if (!other) return { skipped: `${FAMILY_LABEL[family]} accounts can't continue on another provider.` };
     const name = FAMILY_LABEL[other];
     const families = await this.families.resolve(paseo);
     const state = await this.store.read();
@@ -944,7 +988,12 @@ export class Service {
     const info = await agentInfo(paseo, agentId);
     if (!info || info.archived) throw new Error("That agent is no longer available.");
     const family = (await this.families.resolve(paseo))[info.provider];
-    if (!family) throw new Error(`${info.provider} agents don't use Claude or ChatGPT subscription accounts.`);
+    if (!family) throw new Error(`${info.provider} agents don't use Claude, ChatGPT or OpenCode Go subscription accounts.`);
+    if (!FORK_PAIRS[family]) {
+      throw new Error(
+        `${FAMILY_LABEL[family]} agents can't continue on another provider. Wait for the limit to reset, or start the work in a new agent on another account.`,
+      );
+    }
     if (info.status === "running" || info.status === "initializing") {
       throw new Error("This agent is working right now. Wait for its turn to finish, then continue it elsewhere.");
     }
@@ -980,6 +1029,7 @@ export class Service {
       sourceAgentId: agentId,
       timeline,
       why,
+      previous: SESSION_NAME[target.family],
       bind: async (newAgentId) => {
         await this.store.update((draft) => {
           draft.bindings[newAgentId] = {
@@ -1085,6 +1135,7 @@ export class Service {
       const agentId = agent.id;
       const family = families[agent.provider];
       if (!family || this.switching.has(agentId)) continue;
+      if (!runsOnFamily(family, agent.model)) continue;
       const current = this.runningOn(state, agentId, family);
       const target = this.targetFor(state, agentId, family);
       if (!current || !target || target === current) continue;
@@ -1205,6 +1256,8 @@ export class Service {
     for (const agent of agents) {
       const family = families[agent.provider];
       if (!family || agent.archived) continue;
+      // Free and local OpenCode models don't run on the family's accounts, so nothing of theirs is ours.
+      if (!runsOnFamily(family, agent.model)) continue;
       const accountId = this.targetFor(state, agent.id, family);
       if (!accountId) continue;
       counts.set(accountId, (counts.get(accountId) ?? 0) + 1);
@@ -1287,6 +1340,11 @@ export class Service {
     if (process.env.CODEX_ACCESS_TOKEN) {
       warnings.push("The daemon's environment sets CODEX_ACCESS_TOKEN. Codex agents on your CLI login use it instead of a ChatGPT sign-in.");
     }
+    if (process.env.OPENCODE_API_KEY) {
+      warnings.push(
+        "The daemon's environment sets OPENCODE_API_KEY. Agents on your CLI login fall back to it; agents on added accounts use their own sign-in.",
+      );
+    }
     if ((await this.reopener.locate()) === null) {
       warnings.push(
         "Paseo's command-line tool wasn't found, so running agents change accounts the next time their session starts instead of right away.",
@@ -1307,15 +1365,16 @@ export class Service {
     await this.store.update((draft) => {
       draft.defaults[account.family] = account.id;
     });
-    // Conversations that can't move (Codex threads) are pinned, so this only moves portable ones.
+    // Conversations that can't move (Codex threads, OpenCode Go sessions) are pinned, so this only
+    // moves portable ones.
     return this.reconcile(paseo, "default");
   }
 
   /**
    * Sets an account aside for a while, or brings it back. A disabled account stays signed in, but
    * nothing is routed to it: its agents move to the next account now (busy ones after their turn)
-   * and return when it's enabled again. ChatGPT conversations can't change accounts, so the ones
-   * already on it stay there; `stayed` counts them.
+   * and return when it's enabled again. Conversations that can't change accounts (Codex threads,
+   * OpenCode Go sessions) stay where they are; `stayed` counts them.
    */
   async setAccountEnabled(paseo: PaseoApi, accountId: string, enabled: boolean): Promise<ReopenSummary & { stayed: number }> {
     this.attach(paseo);
@@ -1339,7 +1398,10 @@ export class Service {
       const latest = await this.store.read();
       stayed = (await listAgents(paseo, false)).agents.filter(
         (agent) =>
-          families[agent.provider] === account.family && agent.hasHistory && this.targetFor(latest, agent.id, account.family) === accountId,
+          runsOnFamily(account.family, agent.model) &&
+          families[agent.provider] === account.family &&
+          agent.hasHistory &&
+          this.targetFor(latest, agent.id, account.family) === accountId,
       ).length;
     }
     return { ...summary, stayed };
@@ -1354,7 +1416,9 @@ export class Service {
     const { agents } = await listAgents(paseo, true);
     const state = await this.store.read();
     const current = defaultAccount(state, family);
-    const unpinned = agents.filter((agent) => families[agent.provider] === family && !state.bindings[agent.id]);
+    const unpinned = agents.filter(
+      (agent) => families[agent.provider] === family && runsOnFamily(family, agent.model) && !state.bindings[agent.id],
+    );
     if (!current || unpinned.length === 0) return;
     const at = new Date().toISOString();
     await this.store.update((draft) => {
@@ -1382,7 +1446,10 @@ export class Service {
     const info = await agentInfo(paseo, agentId);
     if (!info) throw new Error("That agent is no longer available.");
     const family = (await this.families.resolve(paseo))[info.provider];
-    if (!family) throw new Error(`${info.provider} agents don't use Claude or ChatGPT subscription accounts.`);
+    if (!family) throw new Error(`${info.provider} agents don't use Claude, ChatGPT or OpenCode Go subscription accounts.`);
+    if (!runsOnFamily(family, info.model)) {
+      throw new Error(`This agent doesn't run on an ${FAMILY_LABEL[family]} model, so it has no account to switch.`);
+    }
     const adapter = this.adapters[family];
     const state = await this.store.read();
     const target = accountId ? findAccount(state, accountId) : defaultAccount(state, family);
@@ -1402,7 +1469,7 @@ export class Service {
           paseo,
           agentId,
           target,
-          `you moved the work to your ChatGPT account "${target.label}"`,
+          `you moved the work to your ${THREAD_WORD[family]} account "${target.label}"`,
           undefined,
           "user",
         );
@@ -1446,10 +1513,12 @@ export class Service {
     const account = findAccount(state, accountId);
     if (!account) throw new Error("That account no longer exists.");
     if (account.kind === "main") {
-      throw new Error("Your CLI login can't be removed here. Sign out with `claude auth logout` or `codex logout` instead.");
+      throw new Error(
+        "Your CLI login can't be removed here. Sign out with `claude auth logout`, `codex logout` or `opencode auth logout` instead.",
+      );
     }
     if (!this.adapters[account.family].portable) {
-      // These conversations can't move to another ChatGPT account, so removing theirs would strand them.
+      // These conversations can't move to another account of the same provider, so removing theirs would strand them.
       const families = await this.families.resolve(paseo);
       const stranded = (await listAgents(paseo, false)).agents.filter(
         (agent) =>
@@ -1460,7 +1529,7 @@ export class Service {
       if (stranded.length > 0) {
         const one = stranded.length === 1;
         throw new Error(
-          `${stranded.length} ChatGPT conversation${one ? "" : "s"} still ${one ? "runs" : "run"} on ${account.label} and can't move to another account. Archive ${
+          `${stranded.length} ${THREAD_WORD[account.family]} conversation${one ? "" : "s"} still ${one ? "runs" : "run"} on ${account.label} and can't move to another account. Archive ${
             one ? "it" : "them"
           } (the work stays in your files) or continue ${one ? "it" : "them"} on another account from the account button, then remove ${account.label}.`,
         );
@@ -1689,6 +1758,7 @@ function toAgentInfo(agent: AgentSnapshot): AgentInfo {
   return {
     id: agent.id,
     provider: agent.provider,
+    model: agent.model ?? null,
     status: agent.status,
     archived: Boolean(agent.archivedAt),
     hasHistory: Boolean(agent.lastUserMessageAt),
