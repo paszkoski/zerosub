@@ -1,14 +1,25 @@
-import { lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mergeShared, prepareClaudeHome, prepareCodexHome, removeHome } from "./homes";
+import {
+  mergeShared,
+  prepareClaudeHome,
+  prepareCodexHome,
+  prepareOpenCodeHome,
+  readOpenCodeKey,
+  removeHome,
+  removeOpenCodeKey,
+  writeOpenCodeKey,
+} from "./homes";
 
 let root: string;
 const saved = {
   CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
   CODEX_HOME: process.env.CODEX_HOME,
   PASEO_HOME: process.env.PASEO_HOME,
+  PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+  XDG_DATA_HOME: process.env.XDG_DATA_HOME,
 };
 
 beforeEach(async () => {
@@ -152,6 +163,54 @@ describe("prepareCodexHome", () => {
     for (const name of ["auth.json", "models_cache.json", "state_5.sqlite", "state_5.sqlite-wal", "..codex-global-state.json.tmp-1"]) {
       expect(await lstat(join(home, name)).catch(() => null)).toBeNull();
     }
+  });
+});
+
+describe("prepareOpenCodeHome", () => {
+  it("keeps both CLIs' logins private, shares history and caches, and writes the key to pi's auth file", async () => {
+    const main = join(root, "pi-agent");
+    const data = join(root, "xdg-data");
+    const home = join(root, "homes", "opencode-a");
+    process.env.PI_CODING_AGENT_DIR = main;
+    process.env.XDG_DATA_HOME = data;
+    await mkdir(join(main, "sessions"), { recursive: true });
+    await writeFile(join(main, "settings.json"), "{}");
+    await writeFile(join(main, "auth.json"), "{}");
+    await mkdir(join(data, "opencode", "venvs"), { recursive: true });
+    await writeFile(join(data, "opencode", "opencode.db"), "");
+    await writeFile(join(data, "opencode", "opencode.db-wal"), "");
+
+    await writeOpenCodeKey(home, "oc_test_key");
+    await prepareOpenCodeHome(home, true);
+
+    expect(await isLinkTo(join(home, "pi", "sessions"), join(main, "sessions"))).toBe(true);
+    expect(await isLinkTo(join(home, "pi", "settings.json"), join(main, "settings.json"))).toBe(true);
+    // pi's login is this account's own file, not a link to the user's login.
+    expect((await lstat(join(home, "pi", "auth.json"))).isSymbolicLink()).toBe(false);
+    expect(JSON.parse(await readFile(join(home, "pi", "auth.json"), "utf8"))).toEqual({
+      "opencode-go": { type: "api_key", key: "oc_test_key" },
+    });
+    expect(await isLinkTo(join(home, "oc-data", "opencode", "venvs"), join(data, "opencode", "venvs"))).toBe(true);
+    for (const name of ["opencode.db", "opencode.db-wal"]) {
+      expect(await lstat(join(home, "oc-data", "opencode", name)).catch(() => null)).toBeNull();
+    }
+    if (process.platform !== "win32") {
+      expect((await stat(join(home, "key"))).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  it("clears pi's login when the account's key is gone", async () => {
+    const home = join(root, "homes", "opencode-b");
+    process.env.PI_CODING_AGENT_DIR = join(root, "pi-agent");
+    process.env.XDG_DATA_HOME = join(root, "xdg-data");
+    await writeOpenCodeKey(home, "oc_test_key");
+    await prepareOpenCodeHome(home, true);
+    expect(await readOpenCodeKey(home)).toBe("oc_test_key");
+    expect(await lstat(join(home, "pi", "auth.json")).catch(() => null)).not.toBeNull();
+
+    await removeOpenCodeKey(home);
+    await prepareOpenCodeHome(home, true);
+    expect(await lstat(join(home, "pi", "auth.json")).catch(() => null)).toBeNull();
   });
 });
 

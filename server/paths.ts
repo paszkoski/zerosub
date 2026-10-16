@@ -35,3 +35,18 @@ export function mainCodexHome(): string {
   const configured = process.env.CODEX_HOME?.trim();
   return configured ? resolve(configured) : join(homedir(), ".codex");
 }
+
+/** The pi agent directory (`PI_CODING_AGENT_DIR`), resolved the way Paseo and pi resolve it. */
+export function mainPiAgentDir(): string {
+  const configured = process.env.PI_CODING_AGENT_DIR?.trim();
+  if (!configured) return join(homedir(), ".pi", "agent");
+  if (configured === "~") return homedir();
+  if (configured.startsWith("~/")) return resolve(homedir(), configured.slice(2));
+  return resolve(configured);
+}
+
+/** The opencode CLI's data directory: its database (credentials and sessions), logs and caches. */
+export function mainOpenCodeDataDir(): string {
+  const configured = process.env.XDG_DATA_HOME?.trim();
+  return join(configured ? resolve(configured) : join(homedir(), ".local", "share"), "opencode");
+}

@@ -1,7 +1,7 @@
 import { lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { join, sep } from "node:path";
-import { homesDir, mainClaudeDir, mainClaudeGlobalConfig, mainCodexHome } from "./paths";
+import { homesDir, mainClaudeDir, mainClaudeGlobalConfig, mainCodexHome, mainOpenCodeDataDir, mainPiAgentDir } from "./paths";
 
 /**
  * A managed account home is a real directory holding that account's own credentials and account
@@ -349,4 +349,70 @@ export async function codexSqliteHome(): Promise<string | null> {
   // A `sqlite_home` in the (shared) config.toml already applies to every account.
   if (/^\s*sqlite_home\s*=/m.test(config)) return null;
   return mainCodexHome();
+}
+
+// --------------------------------------------------------------------------- OpenCode Go
+
+/**
+ * One OpenCode Go account, however it is reached: a key file at the home's root, plus an overlay
+ * for each CLI the family can run on. The pi agent directory keeps only its login private; the
+ * opencode data directory keeps only its database (the credential and the account's sessions).
+ * Everything else — pi's history and settings, opencode's logs, snapshots and tool data — is
+ * symlinked to the main directories, so usage and caches stay in one place.
+ */
+const OPENCODE_KEY_FILE = "key";
+
+/** The key as pasted at sign-in. The one credential both CLIs' overlays are fed from. */
+export async function readOpenCodeKey(home: string): Promise<string | null> {
+  try {
+    const value = (await readFile(join(home, OPENCODE_KEY_FILE), "utf8")).trim();
+    return value || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function writeOpenCodeKey(home: string, key: string): Promise<void> {
+  await mkdir(home, { recursive: true, mode: 0o700 });
+  const path = join(home, OPENCODE_KEY_FILE);
+  const temporary = `${path}.zerosub.${randomBytes(4).toString("hex")}.tmp`;
+  await writeFile(temporary, `${key.trim()}\n`, { mode: 0o600 });
+  await rename(temporary, path);
+}
+
+export async function removeOpenCodeKey(home: string): Promise<void> {
+  await rm(join(home, OPENCODE_KEY_FILE), { force: true });
+}
+
+function piPrivate(name: string): boolean {
+  return name === "auth.json" || isTemporary(name);
+}
+
+function opencodeDataPrivate(name: string): boolean {
+  return name.startsWith("opencode.db") || isTemporary(name);
+}
+
+/** Writes pi's auth file (mode 0600) from the account's saved key, so pi sessions open signed in. */
+async function writePiAuth(home: string): Promise<void> {
+  const path = join(home, "pi", "auth.json");
+  const key = await readOpenCodeKey(home);
+  if (!key) {
+    // No key means the account is signed out; a stale login would quietly resurrect it.
+    await rm(path, { force: true });
+    return;
+  }
+  await writeJsonAtomically(path, { "opencode-go": { type: "api_key", key } });
+}
+
+export async function prepareOpenCodeHome(home: string, force = false): Promise<void> {
+  const last = lastSync.get(home);
+  if (!force && last && Date.now() - last < SYNC_TTL_MS) return;
+  await syncOverlay(join(home, "pi"), { main: mainPiAgentDir(), shareDirs: ["sessions"], isPrivate: piPrivate });
+  await syncOverlay(join(home, "oc-data", "opencode"), {
+    main: mainOpenCodeDataDir(),
+    shareDirs: [],
+    isPrivate: opencodeDataPrivate,
+  });
+  await writePiAuth(home);
+  lastSync.set(home, Date.now());
 }
